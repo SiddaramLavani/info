@@ -1,0 +1,290 @@
+static struct f2fs_file_io_stat *
+f2fs_file_io_stat_find(struct f2fs_stat_info *si, struct inode *inode)
+{
+	struct f2fs_file_io_stat *stat;
+
+	list_for_each_entry(stat, &si->file_io_list, list) {
+		if (stat->inode == inode)
+			return stat;
+	}
+
+	return NULL;
+}
+
+static struct f2fs_file_io_stat *
+f2fs_file_io_stat_get(struct file *file)
+{
+	struct inode *inode = file_inode(file);
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+	struct f2fs_stat_info *si = F2FS_STAT(sbi);
+	struct f2fs_file_io_stat *stat;
+	unsigned long flags;
+
+	spin_lock_irqsave(&si->file_io_lock, flags);
+
+	stat = f2fs_file_io_stat_find(si, inode);
+	if (stat) {
+		spin_unlock_irqrestore(&si->file_io_lock, flags);
+		return stat;
+	}
+
+	spin_unlock_irqrestore(&si->file_io_lock, flags);
+
+	stat = kzalloc(sizeof(*stat), GFP_NOFS);
+	if (!stat)
+		return NULL;
+
+	stat->inode = inode;
+	stat->pid = current->tgid;
+	strscpy(stat->comm, current->comm, sizeof(stat->comm));
+
+	/*
+	 * Keep the inode alive while the statistics entry exists.
+	 */
+	ihold(inode);
+
+	if (file_dentry(file))
+		strscpy(stat->filename,
+			file_dentry(file)->d_name.name,
+			sizeof(stat->filename));
+
+	spin_lock_irqsave(&si->file_io_lock, flags);
+
+	/*
+	 * Check again because another CPU could have created the
+	 * entry while we were allocating it.
+	 */
+	{
+		struct f2fs_file_io_stat *old;
+
+		old = f2fs_file_io_stat_find(si, inode);
+		if (old) {
+			spin_unlock_irqrestore(&si->file_io_lock, flags);
+			iput(inode);
+			kfree(stat);
+			return old;
+		}
+	}
+
+	list_add_tail(&stat->list, &si->file_io_list);
+
+	spin_unlock_irqrestore(&si->file_io_lock, flags);
+
+	return stat;
+}
+
+void f2fs_file_io_stat_read(struct file *file, ssize_t bytes,
+			    bool direct)
+{
+	struct inode *inode = file_inode(file);
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+	struct f2fs_stat_info *si = F2FS_STAT(sbi);
+	struct f2fs_file_io_stat *stat;
+	unsigned long flags;
+
+	if (bytes <= 0 || !S_ISREG(inode->i_mode))
+		return;
+
+	stat = f2fs_file_io_stat_get(file);
+	if (!stat)
+		return;
+
+	spin_lock_irqsave(&si->file_io_lock, flags);
+
+	stat->read_bytes += bytes;
+	stat->read_ops++;
+
+	if (direct)
+		stat->direct_read_bytes += bytes;
+	else
+		stat->buffered_read_bytes += bytes;
+
+	spin_unlock_irqrestore(&si->file_io_lock, flags);
+}
+
+void f2fs_file_io_stat_write(struct file *file, ssize_t bytes,
+			     bool direct)
+{
+	struct inode *inode = file_inode(file);
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+	struct f2fs_stat_info *si = F2FS_STAT(sbi);
+	struct f2fs_file_io_stat *stat;
+	unsigned long flags;
+
+	if (bytes <= 0 || !S_ISREG(inode->i_mode))
+		return;
+
+	stat = f2fs_file_io_stat_get(file);
+	if (!stat)
+		return;
+
+	spin_lock_irqsave(&si->file_io_lock, flags);
+
+	stat->write_bytes += bytes;
+	stat->write_ops++;
+
+	if (direct)
+		stat->direct_write_bytes += bytes;
+	else
+		stat->buffered_write_bytes += bytes;
+
+	spin_unlock_irqrestore(&si->file_io_lock, flags);
+}
+
+
+
+
+
+	spin_lock(&si->file_io_lock);
+
+	list_for_each_entry_safe(stat, tmp, &si->file_io_list, list) {
+		list_del(&stat->list);
+		iput(stat->inode);
+		kfree(stat);
+	}
+
+	spin_unlock(&si->file_io_lock);
+
+
+
+
+
+
+
+  static int file_io_stats_show(struct seq_file *seq, void *v)
+{
+	struct f2fs_stat_info *si;
+	struct f2fs_file_io_stat *stat;
+
+	seq_puts(seq,
+		"DEV\tINODE\tPID\tCOMM\tPIN\tMODE\t"
+		"READ\tWRITE\tDREAD\tBREAD\tDWRITE\tBWRITE\tFILE\n");
+
+	seq_puts(seq,
+		"--------------------------------------------------------------------------------\n");
+
+	mutex_lock(&f2fs_stat_mutex);
+
+	list_for_each_entry(si, &f2fs_stat_list, stat_list) {
+		spin_lock(&si->file_io_lock);
+
+		list_for_each_entry(stat, &si->file_io_list, list) {
+			const char *mode;
+
+			if (stat->direct_read_bytes ||
+			    stat->direct_write_bytes) {
+				if (stat->buffered_read_bytes ||
+				    stat->buffered_write_bytes)
+					mode = "MIXED";
+				else
+					mode = "DIRECT";
+			} else {
+				mode = "BUFFERED";
+			}
+
+			seq_printf(seq,
+				"%pg\t%lu\t%d\t%s\t%c\t%s\t"
+				"%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%s\n",
+				si->sbi->sb->s_bdev,
+				stat->inode->i_ino,
+				stat->pid,
+				stat->comm,
+				f2fs_is_pinned_file(stat->inode) ? 'Y' : 'N',
+				mode,
+				stat->read_bytes,
+				stat->write_bytes,
+				stat->direct_read_bytes,
+				stat->buffered_read_bytes,
+				stat->direct_write_bytes,
+				stat->buffered_write_bytes,
+				stat->filename);
+		}
+
+		spin_unlock(&si->file_io_lock);
+	}
+
+	mutex_unlock(&f2fs_stat_mutex);
+
+	return 0;
+}
+
+static int file_io_stats_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, file_io_stats_show, NULL);
+}
+
+static const struct file_operations file_io_stats_fops = {
+	.owner		= THIS_MODULE,
+	.open		= file_io_stats_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+
+
+
+static ssize_t file_io_stats_reset_write(struct file *file,
+					 const char __user *buf,
+					 size_t count, loff_t *ppos)
+{
+	LIST_HEAD(free_list);
+	struct f2fs_stat_info *si;
+	struct f2fs_file_io_stat *stat, *tmp;
+
+	mutex_lock(&f2fs_stat_mutex);
+
+	list_for_each_entry(si, &f2fs_stat_list, stat_list) {
+		spin_lock(&si->file_io_lock);
+
+		list_for_each_entry_safe(stat, tmp,
+					 &si->file_io_list, list) {
+			list_del(&stat->list);
+			list_add(&stat->list, &free_list);
+		}
+
+		spin_unlock(&si->file_io_lock);
+	}
+
+	mutex_unlock(&f2fs_stat_mutex);
+
+	list_for_each_entry_safe(stat, tmp, &free_list, list) {
+		list_del(&stat->list);
+		iput(stat->inode);
+		kfree(stat);
+	}
+
+	return count;
+}
+
+static const struct file_operations file_io_stats_reset_fops = {
+	.owner	= THIS_MODULE,
+	.write	= file_io_stats_reset_write,
+};
+
+
+
+
+static ssize_t f2fs_file_read_iter(struct kiocb *iocb,
+				   struct iov_iter *to)
+{
+	struct inode *inode = file_inode(iocb->ki_filp);
+	bool dio;
+	ssize_t ret;
+
+	/* existing code ... */
+
+	dio = f2fs_should_use_dio(inode, iocb, to);
+
+	if (dio)
+		ret = f2fs_dio_read_iter(iocb, to);
+	else
+		ret = filemap_read(iocb, to, 0);
+
+	if (ret > 0)
+		f2fs_file_io_stat_read(iocb->ki_filp, ret, dio);
+
+	/* existing code ... */
+
+	return ret;
+}
