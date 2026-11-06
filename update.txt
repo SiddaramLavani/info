@@ -1,0 +1,108 @@
+F2FS Write Completion Offloading – Test Cases and Objectives
+
+Test Case 1: F2FS Write Completion Offloading Verification
+
+Objective:
+
+* Verify that the F2FS write-completion offloading mechanism introduced by the patch is triggered when the configured folio threshold is exceeded.
+* Confirm that the completion work is successfully queued, executed and finished through the workqueue.
+* Verify that the offloading mechanism is inactive when the threshold is set to UINT_MAX or when running an unpatched kernel.
+
+Test procedure:
+
+1. Mount the UFS test partition using F2FS.
+2. Configure max_write_bio_folio_cnt on the patched kernel. The backported implementation uses this single module parameter.
+3. Execute a buffered write workload using fio:
+    * 4 parallel jobs.
+    * 256 MB per job.
+    * 1 MB block size.
+    * Buffered I/O (direct=0).
+    * end_fsync=1 to synchronize data at the end of each job.
+4. Enable kernel tracing to capture workqueue, block I/O and UFS interrupt events during the workload.
+5. Collect and analyse the trace to identify the F2FS-specific completion workqueue callback.
+
+Parameters/configurations tested:
+
+* Unpatched kernel.
+* Patched kernel with max_write_bio_folio_cnt=UINT_MAX.
+* Patched kernel with finite folio thresholds (e.g. 128, 64 and 32).
+
+Measurements collected:
+
+* Number of F2FS completion work items queued.
+* Number of completion work items started.
+* Number of completion work items finished.
+* Total workqueue events.
+* Block request completion events.
+* UFS interrupt events.
+* fio execution status.
+
+Expected outcome:
+
+* Unpatched kernel: No patch-specific F2FS completion workqueue callback should be observed.
+* Patched kernel with UINT_MAX: Threshold-triggered offloading should remain inactive.
+* Patched kernel with a finite threshold: Qualifying write completions should be deferred to the F2FS workqueue, and the corresponding callbacks should execute successfully.
+
+Purpose: Validate the functional behaviour of the patch and confirm that the threshold-controlled deferred-completion path is operational.
+
+⸻
+
+Test Case 2: UFS Write Load – Scheduling Latency Evaluation
+
+Objective:
+
+* Evaluate whether deferring F2FS write-completion processing from atomic context to a workqueue reduces scheduling latency under concurrent UFS write activity.
+* Compare worst-case and average scheduling latency between unpatched and patched kernel configurations.
+
+Test procedure:
+
+1. Mount the UFS test partition using F2FS.
+2. Identify the CPU handling the UFS interrupt and pin the cyclictest monitoring thread to that CPU.
+3. Run cyclictest with:
+    * Real-time scheduling priority: 80.
+    * Sampling interval: 200 microseconds.
+    * Test duration: 30 seconds.
+4. Execute fio buffered writes concurrently on the remaining CPUs:
+    * 4 parallel jobs.
+    * 256 MB per job.
+    * 1 MB block size.
+    * Buffered I/O (direct=0).
+    * end_fsync=1.
+5. Capture scheduler, interrupt, workqueue and block I/O trace events throughout the test.
+6. Repeat the test with the unpatched kernel and different patched-kernel folio thresholds.
+
+Parameters/configurations tested:
+
+* Unpatched kernel.
+* Patched kernel with max_write_bio_folio_cnt=UINT_MAX.
+* Patched kernel with finite thresholds (e.g. 128, 64 and 32).
+
+Measurements collected:
+
+* Cyclictest minimum scheduling latency.
+* Cyclictest average scheduling latency.
+* Cyclictest maximum scheduling latency.
+* Scheduler wakeup and context-switch events.
+* UFS interrupt activity.
+* Workqueue queue and execution events.
+* Block request issue and completion events.
+* fio execution status.
+
+Expected outcome:
+
+* The unpatched kernel performs write completion through the original completion path.
+* The patched kernel with a finite threshold defers qualifying completion processing to a workqueue.
+* Reduced completion processing in atomic context is expected to reduce worst-case scheduling delays under UFS write load.
+
+Purpose: Evaluate the potential system-level latency benefit of the patch, particularly its effect on worst-case scheduling latency during concurrent UFS write operations.
+
+⸻
+
+Overall Test Objective
+
+The two test cases validate different aspects of the F2FS patch:
+
+1. Test Case 1 – Functional validation: Confirms that threshold-based F2FS write-completion offloading is triggered and that the deferred work executes successfully.
+2. Test Case 2 – Performance evaluation: Measures scheduling latency under concurrent UFS write activity to determine whether deferred completion processing improves worst-case system responsiveness.
+
+Both tests use the same F2FS-formatted UFS test partition and buffered fio write workload to exercise the physical UFS I/O path.
