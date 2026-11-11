@@ -1,0 +1,311 @@
+
+#define _GNU_SOURCE
+#include <linux/dm-ioctl.h>
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#define DM_CONTROL "/dev/device-mapper"
+#define KEY_HEX_LEN 128
+#define SECTOR_SIZE 512
+
+static void wipe(void *ptr, size_t len)
+{
+    volatile unsigned char *p = ptr;
+    while (len--)
+        *p++ = 0;
+}
+
+static void init_dm(struct dm_ioctl *d)
+{
+    memset(d, 0, sizeof(*d));
+    d->version[0] = DM_VERSION_MAJOR;
+    d->version[1] = DM_VERSION_MINOR;
+    d->version[2] = DM_VERSION_PATCHLEVEL;
+    d->data_size = sizeof(*d);
+    d->data_start = sizeof(*d);
+}
+
+static int read_key(const char *path, char key[KEY_HEX_LEN + 1])
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        perror("open key file");
+        return -1;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) ||
+        (st.st_mode & 077)) {
+        fprintf(stderr, "Key file must be regular and mode 0600 or stricter\n");
+        close(fd);
+        return -1;
+    }
+
+    char buf[KEY_HEX_LEN + 4] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf));
+    close(fd);
+
+    if (n < 0) {
+        perror("read key");
+        wipe(buf, sizeof(buf));
+        return -1;
+    }
+
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+        n--;
+
+    if (n != KEY_HEX_LEN) {
+        fprintf(stderr, "Expected a 128-character AES-XTS key\n");
+        wipe(buf, sizeof(buf));
+        return -1;
+    }
+
+    for (int i = 0; i < KEY_HEX_LEN; i++) {
+        char c = buf[i];
+        if (!((c >= '0' && c <= '9') ||
+              (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F'))) {
+            fprintf(stderr, "Key must contain hexadecimal characters only\n");
+            wipe(buf, sizeof(buf));
+            return -1;
+        }
+    }
+
+    memcpy(key, buf, KEY_HEX_LEN);
+    key[KEY_HEX_LEN] = '\0';
+    wipe(buf, sizeof(buf));
+    return 0;
+}
+
+static int dm_create(int fd, const char *name)
+{
+    struct dm_ioctl d;
+    init_dm(&d);
+
+    if (strlen(name) >= sizeof(d.name)) {
+        fprintf(stderr, "Device name too long\n");
+        return -1;
+    }
+
+    strcpy(d.name, name);
+
+    if (ioctl(fd, DM_DEV_CREATE, &d) < 0) {
+        perror("DM_DEV_CREATE");
+        return -1;
+    }
+
+    printf("Created mapping: %s\n", name);
+    return 0;
+}
+
+static int dm_load_crypt(int fd, const char *name,
+                         uint64_t sectors, const char *device,
+                         char *key)
+{
+    char params[512];
+
+    int n = snprintf(params, sizeof(params),
+                     "aes-xts-plain64 %s 0 %s 0",
+                     key, device);
+
+    if (n < 0 || (size_t)n >= sizeof(params)) {
+        fprintf(stderr, "Crypt table parameters too long\n");
+        return -1;
+    }
+
+    size_t spec_size = sizeof(struct dm_target_spec);
+    size_t next = (spec_size + (size_t)n + 1 + 7) & ~(size_t)7;
+    size_t total = sizeof(struct dm_ioctl) + next;
+
+    unsigned char *buffer = calloc(1, total);
+    if (!buffer) {
+        perror("calloc");
+        wipe(params, sizeof(params));
+        return -1;
+    }
+
+    struct dm_ioctl *d = (struct dm_ioctl *)buffer;
+    init_dm(d);
+
+    d->data_size = total;
+    d->data_start = sizeof(*d);
+    d->target_count = 1;
+    d->flags = DM_SECURE_DATA;
+
+    if (strlen(name) >= sizeof(d->name)) {
+        fprintf(stderr, "Device name too long\n");
+        wipe(buffer, total);
+        free(buffer);
+        wipe(params, sizeof(params));
+        return -1;
+    }
+
+    strcpy(d->name, name);
+
+    struct dm_target_spec *spec =
+        (struct dm_target_spec *)(buffer + d->data_start);
+
+    spec->sector_start = 0;
+    spec->length = sectors;
+    spec->status = 0;
+    spec->next = next;
+    strcpy(spec->target_type, "crypt");
+
+    char *target_params = (char *)(spec + 1);
+    memcpy(target_params, params, (size_t)n + 1);
+
+    int ret = ioctl(fd, DM_TABLE_LOAD, d);
+
+    if (ret < 0)
+        perror("DM_TABLE_LOAD");
+    else
+        printf("Crypt table loaded successfully\n");
+
+    wipe(buffer, total);
+    free(buffer);
+    wipe(params, sizeof(params));
+
+    return ret < 0 ? -1 : 0;
+}
+
+static int dm_resume(int fd, const char *name)
+{
+    struct dm_ioctl d;
+    init_dm(&d);
+    strcpy(d.name, name);
+
+    if (ioctl(fd, DM_DEV_SUSPEND, &d) < 0) {
+        perror("DM_DEV_SUSPEND (resume)");
+        return -1;
+    }
+
+    printf("Mapping activated: %s\n", name);
+    return 0;
+}
+
+static int dm_remove(int fd, const char *name)
+{
+    struct dm_ioctl d;
+    init_dm(&d);
+    strcpy(d.name, name);
+
+    if (ioctl(fd, DM_DEV_REMOVE, &d) < 0) {
+        perror("DM_DEV_REMOVE");
+        return -1;
+    }
+
+    printf("Mapping removed: %s\n", name);
+    return 0;
+}
+
+static int dm_status(int fd, const char *name)
+{
+    struct dm_ioctl d;
+    init_dm(&d);
+    strcpy(d.name, name);
+
+    if (ioctl(fd, DM_DEV_STATUS, &d) < 0) {
+        perror("DM_DEV_STATUS");
+        return -1;
+    }
+
+    printf("Mapping exists: %s\n", d.name);
+    printf("Device number: %u:%u\n",
+           (unsigned)(d.dev >> 20),
+           (unsigned)(d.dev & ((1U << 20) - 1)));
+    printf("Open count: %d\n", d.open_count);
+    printf("Flags: 0x%x\n", d.flags);
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 3 && !strcmp(argv[1], "status")) {
+        int fd = open(DM_CONTROL, O_RDWR | O_CLOEXEC);
+        if (fd < 0) {
+            perror("open device-mapper");
+            return 1;
+        }
+        int ret = dm_status(fd, argv[2]);
+        close(fd);
+        return ret ? 1 : 0;
+    }
+
+    if (argc != 6 || strcmp(argv[1], "create")) {
+        fprintf(stderr,
+            "Usage:\n"
+            "  %s create NAME SECTORS DEVICE KEYFILE\n"
+            "  %s status NAME\n",
+            argv[0], argv[0]);
+        return 2;
+    }
+
+    char *end = NULL;
+    errno = 0;
+    unsigned long long sectors = strtoull(argv[3], &end, 10);
+
+    if (errno || !end || *end || !sectors) {
+        fprintf(stderr, "Invalid sector count\n");
+        return 2;
+    }
+
+    if (strchr(argv[4], ' ') || strlen(argv[4]) >= 256) {
+        fprintf(stderr, "Invalid device path\n");
+        return 2;
+    }
+
+    if (access(argv[4], R_OK | W_OK) != 0) {
+        perror("Underlying device access");
+        return 1;
+    }
+
+    char key[KEY_HEX_LEN + 1] = {0};
+    if (read_key(argv[5], key))
+        return 1;
+
+    int fd = open(DM_CONTROL, O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        perror("open /dev/device-mapper");
+        wipe(key, sizeof(key));
+        return 1;
+    }
+
+    struct dm_ioctl version;
+    init_dm(&version);
+
+    if (ioctl(fd, DM_VERSION, &version) < 0) {
+        perror("DM_VERSION");
+        close(fd);
+        wipe(key, sizeof(key));
+        return 1;
+    }
+
+    printf("Device mapper version: %u.%u.%u\n",
+           version.version[0], version.version[1],
+           version.version[2]);
+
+    int ret = dm_create(fd, argv[2]);
+
+    if (!ret)
+        ret = dm_load_crypt(fd, argv[2],
+                            (uint64_t)sectors, argv[4], key);
+
+    if (!ret)
+        ret = dm_resume(fd, argv[2]);
+
+    wipe(key, sizeof(key));
+
+    if (ret)
+        dm_remove(fd, argv[2]);
+
+    close(fd);
+    return ret ? 1 : 0;
+}
