@@ -1,0 +1,110 @@
+Activity: F2FS Direct I/O Bypass Prevention Using dm-crypt
+
+Objective
+
+* Replace F2FS filesystem-level encryption (fscrypt) with block-level encryption (dm-crypt).
+* Prevent direct I/O (O_DIRECT) requests from falling back to buffered I/O due to software-based filesystem encryption.
+* Ensure AnTuTu benchmark read requests reach the underlying UFS device.
+
+Work Completed
+
+1. Kernel Configuration Verification
+
+* Verified that the required kernel configurations were enabled:
+    * CONFIG_BLK_DEV_DM
+    * CONFIG_DM_CRYPT
+    * CONFIG_FS_ENCRYPTION
+    * CONFIG_F2FS_FS
+    * Block inline encryption support.
+* Verified that the device-mapper crypt target was registered in the kernel.
+* Confirmed that the kernel rebuild was not required.
+
+2. Device-Mapper Utility Investigation
+
+* Checked the available Android device-mapper utilities.
+* Found that dmctl was available, but dmsetup and cryptsetup were not present.
+* Although the kernel exposed the crypt target (version 2.1.0), the existing dmctl userspace parser did not recognize the crypt target during device creation.
+
+3. Developed a Native dm-crypt Helper
+
+* Installed Android NDK on the Linux build environment.
+* Configured the ARM64 Android API 36 compiler toolchain using Clang.
+* Developed a native ARM64 userspace helper using the Linux device-mapper ioctl interface (linux/dm-ioctl.h).
+* Implemented the following device-mapper operations:
+    * DM_DEV_CREATE
+    * DM_TABLE_LOAD
+    * DM_DEV_SUSPEND
+    * DM_DEV_STATUS
+* Used AES-XTS (aes-xts-plain64) as the encryption algorithm.
+
+4. Resolved Device-Mapper ABI Version Mismatch
+
+* Initially encountered a device-mapper ioctl interface version mismatch:
+    * Kernel: 4.48.0
+    * Userspace NDK header: 4.50.0
+* Updated the helper to use the device-mapper interface version supported by the kernel (4.48.0).
+* Successfully compiled and executed the helper on the Android device.
+
+5. Created dm-crypt Mapping
+
+* Selected /dev/block/sdg as the dedicated storage partition.
+* Verified its capacity:
+    * Size: 32 GiB
+    * Sector count: 67,108,864 (512-byte sectors).
+* Generated a random 512-bit AES-XTS encryption key.
+* Created the dm-crypt mapping with the following configuration:
+    * Mapping name: antutu_crypt
+    * Underlying device: /dev/block/sdg
+    * Encryption: aes-xts-plain64
+    * IV offset: 0
+    * Data offset: 0
+* Successfully created, loaded and activated the mapping.
+* Verified the mapping through dmctl.
+* Device-mapper identifier: 254:23 (/dev/block/dm-23).
+
+6. Created and Mounted F2FS Filesystem
+
+* Created an F2FS filesystem on the mapped device (/dev/block/dm-23).
+* Mounted the filesystem at /mnt/antutu.
+* Verified the mounted filesystem and available capacity.
+* F2FS is configured without filesystem-level encryption; encryption is handled by dm-crypt underneath.
+
+7. Integrated AnTuTu Storage
+
+* Stopped the AnTuTu application before modifying its storage directory.
+* Created the corresponding directory on the new F2FS mount.
+* Copied the existing AnTuTu files to the new storage location.
+* Redirected the original AnTuTu files directory to the new filesystem using a bind mount.
+* Verified the mount and application access.
+
+Current Storage Architecture
+
+AnTuTu Application
+|
+v
+F2FS (without fscrypt)
+|
+v
+dm-crypt (AES-XTS)
+|
+v
+/dev/block/sdg
+|
+v
+UFS Storage
+
+Current Status
+
+* dm-crypt mapping creation: Completed.
+* AES-XTS encryption configuration: Completed.
+* F2FS formatting and mounting: Completed.
+* AnTuTu storage redirection: Completed.
+* Application access through the new storage: Working.
+
+Remaining Validation
+
+* Verify that AnTuTu issues O_DIRECT read requests.
+* Trace F2FS to confirm that requests follow the direct-I/O path without buffered-I/O fallback.
+* Capture the corresponding UFS READ commands using ramlog.
+* Compare UFS read-command patterns between the original F2FS encryption implementation and the new dm-crypt implementation.
+* Document the final results and confirm that direct I/O is preserved with dm-crypt.
