@@ -1,3 +1,9 @@
+2. Keep inlinecrypt mount option: Do not remove it, because encrypted Direct I/O in F2FS requires the inline-crypto path in this kernel version.
+3. Enable software fallback: Ensure CONFIG_BLK_INLINE_ENCRYPTION_FALLBACK=y is enabled so blk-crypto can use the Linux Crypto API.
+4. Prevent UFS hardware crypto selection: Modify the UFS crypto profile registration/capability configuration so that hardware ICE is not selected for the test I/O.
+5. Use CPU encryption: Route encrypted BIOs through blk-crypto-fallback, which performs encryption/decryption using the CPU and Linux Crypto API.
+6. Preserve Direct I/O: Retain the fscrypt inline-crypto interface so F2FS can continue encrypted Direct I/O using software fallback and bounce buffers.
+
 7. Verify the implementation:
 Confirm fscrypt reports blk-crypto-fallback.
 Confirm UFS ICE keyslot programming is not used for test I/O.
