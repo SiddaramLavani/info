@@ -1,0 +1,12 @@
+7. Verify the implementation:
+Confirm fscrypt reports blk-crypto-fallback.
+Confirm UFS ICE keyslot programming is not used for test I/O.
+Verify F2FS Direct I/O counters increase.
+Ensure the test workload does not fall back to buffered I/O.
+Confirm dm-default-key also uses software fallback.
+Expected outcome:
+Android FBE remains enabled.
+File and block-level encryption remain enabled.
+CPU performs encryption/decryption instead of UFS ICE.
+Encrypted Direct I/O continues working without buffered I/O fallback.
+Existing encryption policies and on-disk format are preserved, subject to key compatibility.
