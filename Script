@@ -1,84 +1,30 @@
 
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font
-from openpyxl.utils import get_column_letter
+#!/bin/sh
 
-input_file = "input.txt"
-output_file = "sysfs_details.xlsx"
+INPUT_FILE="sysfs_list.txt"
+OUTPUT_FILE="sysfs_values.txt"
 
-wb = Workbook()
-ws = wb.active
-ws.title = "Sysfs Details"
+# Create output file and add header
+echo "Sysfs_Name,Value" > "$OUTPUT_FILE"
 
-# Headers
-ws.append(["Sysfs Path", "Date", "Description"])
+while IFS= read -r path || [ -n "$path" ]
+do
+    # Skip empty lines
+    [ -z "$path" ] && continue
 
-# Header formatting
-for cell in ws[1]:
-    cell.font = Font(bold=True)
-    cell.alignment = Alignment(vertical="top")
+    # Extract sysfs name from path
+    name=$(basename "$path")
 
-sysfs = ""
-date = ""
-description = []
-reading_description = False
+    # Read sysfs value
+    if [ -r "$path" ]; then
+        value=$(cat "$path" 2>/dev/null)
+    else
+        value="NOT_ACCESSIBLE"
+    fi
 
-def save_entry():
-    if sysfs:
-        ws.append([
-            sysfs,
-            date,
-            "\n".join(description)
-        ])
+    # Write name and value
+    printf '%s,%s\n' "$name" "$value" >> "$OUTPUT_FILE"
 
-with open(input_file, "r") as infile:
-    for line in infile:
-        line = line.rstrip("\r\n")
+done < "$INPUT_FILE"
 
-        if line.startswith("What:"):
-            save_entry()
-
-            sysfs = line.split()[-1]
-            date = ""
-            description = []
-            reading_description = False
-
-        elif line.startswith("Date:"):
-            date = line.split()[-1]
-
-        elif line.startswith("Description:"):
-            description.append(
-                line.split(":", 1)[1].lstrip(" \t")
-            )
-            reading_description = True
-
-        elif reading_description:
-            description.append(line)
-
-# Save last entry
-save_entry()
-
-# Column formatting
-ws.column_dimensions["A"].width = 55
-ws.column_dimensions["B"].width = 18
-ws.column_dimensions["C"].width = 100
-
-# Preserve line breaks and display full descriptions
-for row in ws.iter_rows(min_row=2):
-    for cell in row:
-        cell.alignment = Alignment(
-            wrap_text=True,
-            vertical="top"
-        )
-
-# Adjust row heights based on description lines
-for row_num in range(2, ws.max_row + 1):
-    desc = ws.cell(row_num, 3).value or ""
-    ws.row_dimensions[row_num].height = max(
-        30, 15 * (desc.count("\n") + 1)
-    )
-
-wb.save(output_file)
-
-print(f"Excel file generated: {output_file}")
-
+echo "Sysfs values saved to $OUTPUT_FILE"
