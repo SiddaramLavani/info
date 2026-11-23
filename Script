@@ -1,25 +1,42 @@
 
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font
+from openpyxl.utils import get_column_letter
+
 input_file = "input.txt"
-output_file = "output.txt"
+output_file = "sysfs_details.xlsx"
+
+wb = Workbook()
+ws = wb.active
+ws.title = "Sysfs Details"
+
+# Headers
+ws.append(["Sysfs Path", "Date", "Description"])
+
+# Header formatting
+for cell in ws[1]:
+    cell.font = Font(bold=True)
+    cell.alignment = Alignment(vertical="top")
 
 sysfs = ""
 date = ""
 description = []
 reading_description = False
 
-with open(input_file, "r") as infile, open(output_file, "w") as outfile:
+def save_entry():
+    if sysfs:
+        ws.append([
+            sysfs,
+            date,
+            "\n".join(description)
+        ])
 
-    outfile.write("Sysfs,Date,Description\n")
-
+with open(input_file, "r") as infile:
     for line in infile:
-        line = line.rstrip()
+        line = line.rstrip("\r\n")
 
         if line.startswith("What:"):
-            # Start a new entry
-            if sysfs and description:
-                outfile.write(
-                    f'{sysfs},{date},"{" ".join(description)}"\n'
-                )
+            save_entry()
 
             sysfs = line.split()[-1]
             date = ""
@@ -30,16 +47,38 @@ with open(input_file, "r") as infile, open(output_file, "w") as outfile:
             date = line.split()[-1]
 
         elif line.startswith("Description:"):
-            description.append(line.split(":", 1)[1].strip())
+            description.append(
+                line.split(":", 1)[1].lstrip(" \t")
+            )
             reading_description = True
 
         elif reading_description:
-            description.append(line.strip())
+            description.append(line)
 
-    # Write the final entry
-    if sysfs:
-        outfile.write(
-            f'{sysfs},{date},"{" ".join(description)}"\n'
+# Save last entry
+save_entry()
+
+# Column formatting
+ws.column_dimensions["A"].width = 55
+ws.column_dimensions["B"].width = 18
+ws.column_dimensions["C"].width = 100
+
+# Preserve line breaks and display full descriptions
+for row in ws.iter_rows(min_row=2):
+    for cell in row:
+        cell.alignment = Alignment(
+            wrap_text=True,
+            vertical="top"
         )
 
-print(f"Output written to {output_file}")
+# Adjust row heights based on description lines
+for row_num in range(2, ws.max_row + 1):
+    desc = ws.cell(row_num, 3).value or ""
+    ws.row_dimensions[row_num].height = max(
+        30, 15 * (desc.count("\n") + 1)
+    )
+
+wb.save(output_file)
+
+print(f"Excel file generated: {output_file}")
+
