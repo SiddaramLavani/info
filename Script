@@ -1,0 +1,45 @@
+
+input_file = "input.txt"
+output_file = "output.txt"
+
+sysfs = ""
+date = ""
+description = []
+reading_description = False
+
+with open(input_file, "r") as infile, open(output_file, "w") as outfile:
+
+    outfile.write("Sysfs,Date,Description\n")
+
+    for line in infile:
+        line = line.rstrip()
+
+        if line.startswith("What:"):
+            # Start a new entry
+            if sysfs and description:
+                outfile.write(
+                    f'{sysfs},{date},"{" ".join(description)}"\n'
+                )
+
+            sysfs = line.split()[-1]
+            date = ""
+            description = []
+            reading_description = False
+
+        elif line.startswith("Date:"):
+            date = line.split()[-1]
+
+        elif line.startswith("Description:"):
+            description.append(line.split(":", 1)[1].strip())
+            reading_description = True
+
+        elif reading_description:
+            description.append(line.strip())
+
+    # Write the final entry
+    if sysfs:
+        outfile.write(
+            f'{sysfs},{date},"{" ".join(description)}"\n'
+        )
+
+print(f"Output written to {output_file}")
